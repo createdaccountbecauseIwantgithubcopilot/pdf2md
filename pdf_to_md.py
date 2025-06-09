@@ -11,6 +11,7 @@ from pathlib import Path
 from pdf2image import convert_from_path
 import argparse
 from google import genai
+from google.genai import types
 from PIL import Image
 
 
@@ -100,7 +101,7 @@ def setup_gemini_client():
     return genai.Client()
 
 
-def transcribe_image_to_markdown(client, image, page_num, total_pages):
+def transcribe_image_to_markdown(client:genai.client, image, page_num, total_pages):
     """Transcribe a single image to markdown using Gemini API."""
     print(f"  Transcribing page {page_num}/{total_pages}...")
     
@@ -129,9 +130,13 @@ Important instructions:
     
     try:
         # Generate content with the PIL image directly
-        response = client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=[prompt, image]
+        response = client.Models.generate_content(
+            model='gemini-2.5-flash-preview-04-17',
+            contents=[prompt, image],
+            config=types.GenerateContentConfig(
+                system_instruction="You are a document transcriber who makes no mistakes",
+                temperature=0.0
+            )
         )
         
         return response.text
