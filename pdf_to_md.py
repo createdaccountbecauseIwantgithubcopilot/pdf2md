@@ -169,7 +169,7 @@ Important instructions:
     try:
         # Generate content with the PIL image directly
         response = client.models.generate_content(
-            model='gemini-2.5-flash-preview-04-17',
+            model='gemini-2.5-flash-preview-05-20',
             contents=[prompt, image],
             config=types.GenerateContentConfig(
                 system_instruction="You are a document transcriber who makes no mistakes",
