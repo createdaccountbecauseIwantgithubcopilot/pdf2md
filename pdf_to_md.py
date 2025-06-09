@@ -48,6 +48,44 @@ def get_quality_preset():
             print("Invalid choice. Please enter 1, 2, or 3.")
 
 
+def check_existing_files(pdf_path, output_mode):
+    """Check if output files already exist and prompt user for action."""
+    pdf_name = Path(pdf_path).stem
+    
+    # Determine which file to check based on output mode
+    if output_mode == "1":
+        output_file = f"{pdf_name}.zip"
+        file_type = "ZIP"
+    else:
+        output_file = f"{pdf_name}.md"
+        file_type = "Markdown"
+    
+    # Check if file exists
+    if os.path.exists(output_file):
+        print(f"\nWarning: {file_type} file '{output_file}' already exists!")
+        print("What would you like to do?")
+        print("1. Delete the existing file and continue")
+        print("2. Exit without making changes")
+        
+        while True:
+            choice = input("Enter your choice (1-2): ").strip()
+            if choice == "1":
+                try:
+                    os.remove(output_file)
+                    print(f"Deleted existing file: {output_file}")
+                    return True
+                except Exception as e:
+                    print(f"Error deleting file: {e}")
+                    sys.exit(1)
+            elif choice == "2":
+                print("Exiting without making changes.")
+                sys.exit(0)
+            else:
+                print("Invalid choice. Please enter 1 or 2.")
+    
+    return True
+
+
 def convert_pdf_to_images(pdf_path, dpi):
     """Convert PDF pages to images."""
     print(f"\nConverting PDF pages to images at {dpi} DPI...")
@@ -101,7 +139,7 @@ def setup_gemini_client():
     return genai.Client()
 
 
-def transcribe_image_to_markdown(client:genai.client, image, page_num, total_pages):
+def transcribe_image_to_markdown(client:genai.Client, image, page_num, total_pages):
     """Transcribe a single image to markdown using Gemini API."""
     print(f"  Transcribing page {page_num}/{total_pages}...")
     
@@ -130,7 +168,7 @@ Important instructions:
     
     try:
         # Generate content with the PIL image directly
-        response = client.Models.generate_content(
+        response = client.models.generate_content(
             model='gemini-2.5-flash-preview-04-17',
             contents=[prompt, image],
             config=types.GenerateContentConfig(
@@ -207,6 +245,9 @@ def main():
     
     # Get quality preset from user
     dpi = get_quality_preset()
+    
+    # Check for existing output files
+    check_existing_files(pdf_file, output_mode)
     
     # Convert PDF to images
     images = convert_pdf_to_images(pdf_file, dpi)
