@@ -172,7 +172,7 @@ Important instructions:
             model='gemini-2.5-flash-preview-05-20',
             contents=[prompt, image],
             config=types.GenerateContentConfig(
-                system_instruction="You are a document transcriber who makes no mistakes",
+                system_instruction="You are a document transcriber who is given images and then transcribes them into markdown documents following a strict format.",
                 temperature=0.0
             )
         )
