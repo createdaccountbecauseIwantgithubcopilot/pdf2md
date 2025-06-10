@@ -13,6 +13,8 @@ import argparse
 from google import genai
 from google.genai import types
 from PIL import Image
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.console import Console
 
 
 def get_output_mode():
@@ -88,15 +90,23 @@ def check_existing_files(pdf_path, output_mode):
 
 def convert_pdf_to_images(pdf_path, dpi):
     """Convert PDF pages to images."""
-    print(f"\nConverting PDF pages to images at {dpi} DPI...")
+    console = Console()
     
-    try:
-        images = convert_from_path(pdf_path, dpi=dpi)
-        print(f"Successfully converted {len(images)} pages")
-        return images
-    except Exception as e:
-        print(f"Error converting PDF: {e}")
-        sys.exit(1)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task(f"[cyan]Converting PDF to images at {dpi} DPI...", total=None)
+        
+        try:
+            images = convert_from_path(pdf_path, dpi=dpi)
+            progress.update(task, description=f"[green]Successfully converted {len(images)} pages")
+            return images
+        except Exception as e:
+            console.print(f"[bold red]Error converting PDF:[/bold red] {e}")
+            sys.exit(1)
 
 
 def create_zip_file(pdf_path, images, dpi):
@@ -105,32 +115,44 @@ def create_zip_file(pdf_path, images, dpi):
     zip_filename = f"{pdf_name}.zip"
     folder_name = pdf_name
     
-    print(f"\nCreating zip file: {zip_filename}")
+    console = Console()
+    console.print(f"\n[bold cyan]Creating zip file:[/bold cyan] {zip_filename}")
     
     try:
         with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for i, image in enumerate(images, 1):
-                # Create image filename
-                image_filename = f"page_{i:03d}.png"
-                image_path = os.path.join(folder_name, image_filename)
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=console
+            ) as progress:
+                task = progress.add_task(f"[cyan]Adding pages to ZIP...", total=len(images))
                 
-                # Save image to temporary file
-                temp_filename = f"temp_page_{i}.png"
-                image.save(temp_filename, 'PNG')
-                
-                # Add to zip with proper path
-                zipf.write(temp_filename, image_path)
-                
-                # Remove temporary file
-                os.remove(temp_filename)
-                
-                print(f"  Added page {i}/{len(images)}")
+                for i, image in enumerate(images, 1):
+                    # Create image filename
+                    image_filename = f"page_{i:03d}.png"
+                    image_path = os.path.join(folder_name, image_filename)
+                    
+                    # Save image to temporary file
+                    temp_filename = f"temp_page_{i}.png"
+                    image.save(temp_filename, 'PNG')
+                    
+                    # Add to zip with proper path
+                    zipf.write(temp_filename, image_path)
+                    
+                    # Remove temporary file
+                    os.remove(temp_filename)
+                    
+                    progress.update(task, advance=1, description=f"[cyan]Adding page {i}/{len(images)}...")
         
-        print(f"\nSuccessfully created {zip_filename}")
-        print(f"Total size: {os.path.getsize(zip_filename) / 1024 / 1024:.2f} MB")
+        console.print(f"\n[bold green]✓[/bold green] Successfully created {zip_filename}")
+        console.print(f"[dim]Total size: {os.path.getsize(zip_filename) / 1024 / 1024:.2f} MB[/dim]")
         
     except Exception as e:
-        print(f"Error creating zip file: {e}")
+        console.print(f"[bold red]Error creating zip file:[/bold red] {e}")
         sys.exit(1)
 
 
@@ -141,8 +163,6 @@ def setup_gemini_client():
 
 def transcribe_image_to_markdown(client:genai.Client, image, page_num, total_pages):
     """Transcribe a single image to markdown using Gemini API."""
-    print(f"  Transcribing page {page_num}/{total_pages}...")
-    
     # Craft a detailed prompt for accurate transcription
     prompt = """Please transcribe ALL text content from this image into properly formatted Markdown.
     
@@ -179,8 +199,7 @@ Important instructions:
         
         return response.text
     except Exception as e:
-        print(f"    Error transcribing page {page_num}: {e}")
-        return f"\n[Error transcribing page {page_num}]\n"
+        return f"\n[Error transcribing page {page_num}: {e}]\n"
 
 
 def create_markdown_file(pdf_path, images):
@@ -188,10 +207,11 @@ def create_markdown_file(pdf_path, images):
     pdf_name = Path(pdf_path).stem
     markdown_filename = f"{pdf_name}.md"
     
-    print(f"\nSetting up Gemini API...")
+    console = Console()
+    console.print(f"\n[bold cyan]Setting up Gemini API...[/bold cyan]")
     client = setup_gemini_client()
     
-    print(f"\nTranscribing {len(images)} pages to markdown...")
+    console.print(f"\n[bold cyan]Transcribing {len(images)} pages to markdown...[/bold cyan]")
     
     try:
         with open(markdown_filename, 'w', encoding='utf-8') as md_file:
@@ -200,24 +220,41 @@ def create_markdown_file(pdf_path, images):
             md_file.write(f"*Transcribed from PDF with {len(images)} pages*\n\n")
             md_file.write("---\n\n")
             
-            # Transcribe each page
-            for i, image in enumerate(images, 1):
-                # Add page separator
-                if i > 1:
-                    md_file.write("\n\n---\n\n")
+            # Transcribe each page with progress bar
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=console
+            ) as progress:
+                task = progress.add_task(f"[cyan]Transcribing pages...", total=len(images))
                 
-                md_file.write(f"## Page {i}\n\n")
-                
-                # Transcribe the page
-                transcribed_text = transcribe_image_to_markdown(client, image, i, len(images))
-                md_file.write(transcribed_text)
-                md_file.write("\n")
+                for i, image in enumerate(images, 1):
+                    # Update progress description
+                    progress.update(task, description=f"[cyan]Transcribing page {i}/{len(images)}...")
+                    
+                    # Add page separator
+                    if i > 1:
+                        md_file.write("\n\n---\n\n")
+                    
+                    md_file.write(f"## Page {i}\n\n")
+                    
+                    # Transcribe the page
+                    transcribed_text = transcribe_image_to_markdown(client, image, i, len(images))
+                    md_file.write(transcribed_text)
+                    md_file.write("\n")
+                    
+                    # Update progress
+                    progress.update(task, advance=1)
         
-        print(f"\nSuccessfully created {markdown_filename}")
-        print(f"File size: {os.path.getsize(markdown_filename) / 1024:.2f} KB")
+        console.print(f"\n[bold green]✓[/bold green] Successfully created {markdown_filename}")
+        console.print(f"[dim]File size: {os.path.getsize(markdown_filename) / 1024:.2f} KB[/dim]")
         
     except Exception as e:
-        print(f"Error creating markdown file: {e}")
+        console.print(f"[bold red]Error creating markdown file:[/bold red] {e}")
         sys.exit(1)
 
 
@@ -228,17 +265,19 @@ def main():
     args = parser.parse_args()
     pdf_file = args.pdf_file
     
+    console = Console()
+    
     # Check if file exists
     if not os.path.exists(pdf_file):
-        print(f"Error: File '{pdf_file}' not found in current directory")
+        console.print(f"[bold red]Error:[/bold red] File '{pdf_file}' not found in current directory")
         sys.exit(1)
     
     # Check if it's a PDF file
     if not pdf_file.lower().endswith('.pdf'):
-        print(f"Error: File '{pdf_file}' is not a PDF file")
+        console.print(f"[bold red]Error:[/bold red] File '{pdf_file}' is not a PDF file")
         sys.exit(1)
     
-    print(f"Processing PDF file: {pdf_file}")
+    console.print(f"[bold cyan]Processing PDF file:[/bold cyan] {pdf_file}")
     
     # Get output mode from user
     output_mode = get_output_mode()
@@ -260,7 +299,7 @@ def main():
         # Transcribe to markdown
         create_markdown_file(pdf_file, images)
     
-    print("\nProcess complete!")
+    console.print("\n[bold green]Process complete! ✨[/bold green]")
 
 
 if __name__ == "__main__":
