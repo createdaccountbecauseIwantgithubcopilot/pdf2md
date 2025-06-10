@@ -103,6 +103,23 @@ def get_quality_preset(quality_arg=None):
             print("Invalid choice. Please enter 1, 2, or 3.")
 
 
+def prompt_retry_failed_pages():
+    """Prompt user to retry pages that hit the retry limit."""
+    print("\nSome pages were completed with issues (hit retry limit).")
+    print("Would you like to retry these pages?")
+    print("1. Yes, retry failed pages")
+    print("2. No, continue with current results")
+    
+    while True:
+        choice = input("Enter your choice (1-2): ").strip()
+        if choice == "1":
+            return True
+        elif choice == "2":
+            return False
+        else:
+            print("Invalid choice. Please enter 1 or 2.")
+
+
 def check_existing_files(pdf_path, output_mode, overwrite=False):
     """Check if output files already exist and prompt user for action."""
     pdf_name = Path(pdf_path).stem
@@ -572,54 +589,68 @@ def create_markdown_file_concurrent(pdf_path, images):
     console.print(f"\n[bold cyan]Setting up Gemini API...[/bold cyan]")
     client = setup_gemini_client()
     
-    console.print(f"\n[bold cyan]Starting concurrent transcription of {len(images)} pages...[/bold cyan]")
+    # Prepare master results dictionary that will persist across retries
+    all_results = {}
+    all_images = {i: img for i, img in enumerate(images, 1)}  # Store images by page number
     
-    # Set up progress display
-    _, create_panel, create_status_table, overall_progress, overall_task = create_progress_display(len(images))
+    # Main retry loop
+    retry_attempt = 0
+    pages_to_process = list(range(1, len(images) + 1))  # Initially process all pages
     
-    # Thread-safe status update function
-    status_lock = threading.Lock()
-    completed_pages = 0
-    live_display = None  # Will be set inside the with Live block
-    
-    def status_callback(page_num, status, details=""):
-        nonlocal completed_pages
-        with status_lock:
-            update_page_status(page_num, status, None, details)
-            if status in ["completed", "completed_with_issues", "error"]:
-                completed_pages += 1
-                overall_progress.update(overall_task, advance=1)
-        # Update the live display (thread-safe)
-        if live_display:
-            try:
-                live_display.update(create_panel())
-            except:
-                pass  # Ignore any display update errors
-    
-    try:
-        # Prepare results dictionary
-        results = {}
-        # Track pages that hit retry limit for debug file
-        debug_pages = {}
+    while True:
+        retry_attempt += 1
+        if retry_attempt > 1:
+            console.print(f"\n[bold cyan]Retry attempt {retry_attempt - 1} - Processing {len(pages_to_process)} pages...[/bold cyan]")
+        else:
+            console.print(f"\n[bold cyan]Starting concurrent transcription of {len(pages_to_process)} pages...[/bold cyan]")
         
-        # Use ThreadPoolExecutor for concurrent transcription
-        # WARNING: Using all pages concurrently may hit API rate limits for large PDFs
-        max_workers = len(images)  # Process all pages concurrently
+        # Set up progress display
+        _, create_panel, create_status_table, overall_progress, overall_task = create_progress_display(len(pages_to_process))
         
-        with Live(create_panel(), console=console, refresh_per_second=30) as live:
-            live_display = live  # Set the reference for the callback
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all transcription tasks
-                future_to_page = {}
-                for i, image in enumerate(images, 1):
-                    future = executor.submit(
-                        transcribe_page_concurrent, 
-                        client, 
-                        image, 
-                        i,
-                        status_callback
-                    )
-                    future_to_page[future] = i
+        # Thread-safe status update function
+        status_lock = threading.Lock()
+        completed_pages = 0
+        live_display = None  # Will be set inside the with Live block
+        
+        def status_callback(page_num, status, details=""):
+            nonlocal completed_pages
+            with status_lock:
+                update_page_status(page_num, status, None, details)
+                if status in ["completed", "completed_with_issues", "error"]:
+                    completed_pages += 1
+                    overall_progress.update(overall_task, advance=1)
+            # Update the live display (thread-safe)
+            if live_display:
+                try:
+                    live_display.update(create_panel())
+                except:
+                    pass  # Ignore any display update errors
+        
+        try:
+            # Prepare results dictionary for this run
+            results = {}
+            # Track pages that hit retry limit for debug file
+            debug_pages = {}
+            
+            # Use ThreadPoolExecutor for concurrent transcription
+            # WARNING: Using all pages concurrently may hit API rate limits for large PDFs
+            max_workers = min(len(pages_to_process), len(images))  # Process only required pages
+            
+            with Live(create_panel(), console=console, refresh_per_second=30) as live:
+                live_display = live  # Set the reference for the callback
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit all transcription tasks for pages needing processing
+                    future_to_page = {}
+                    for page_num in pages_to_process:
+                        image = all_images[page_num]
+                        future = executor.submit(
+                            transcribe_page_concurrent, 
+                            client, 
+                            image, 
+                            page_num,
+                            status_callback
+                        )
+                        future_to_page[future] = page_num
                 
                 # Process completed futures
                 for future in as_completed(future_to_page):
@@ -645,11 +676,63 @@ def create_markdown_file_concurrent(pdf_path, images):
                     except Exception as exc:
                         results[page_num] = f"\n[Error processing page {page_num}: {exc}]\n"
                         console.print(f"[red]Page {page_num} generated an exception: {exc}[/red]")
-                    # Update display after each future completes
-                    live.update(create_panel())
-        
-        # Write results to file in order
-        console.print(f"\n[bold cyan]Writing markdown file...[/bold cyan]")
+                        # Update display after each future completes
+                        live.update(create_panel())
+            
+            # Update master results with this run's results
+            all_results.update(results)
+            
+            # Create/update debug file if any pages hit retry limit
+            if debug_pages:
+                debug_filename = f"{pdf_name}_error_debug.md"
+                # Delete existing debug file if this is a retry
+                if retry_attempt > 1 and os.path.exists(debug_filename):
+                    os.remove(debug_filename)
+                    console.print(f"[dim]Deleted previous debug file[/dim]")
+                
+                console.print(f"\n[bold yellow]Creating debug file for {len(debug_pages)} pages that hit retry limit...[/bold yellow]")
+                
+                with open(debug_filename, 'w', encoding='utf-8') as debug_file:
+                    debug_file.write(f"# {pdf_name} - Error Debug Report\n\n")
+                    debug_file.write(f"*This file contains debug information for pages that reached the retry limit*\n\n")
+                    debug_file.write(f"Retry attempt: {retry_attempt}\n")
+                    debug_file.write(f"Total pages with max retries: {len(debug_pages)}\n\n")
+                    debug_file.write("---\n\n")
+                    
+                    for page_num in sorted(debug_pages.keys()):
+                        debug_info = debug_pages[page_num]
+                        debug_file.write(f"## Page {page_num}\n\n")
+                        debug_file.write("### Final Transcription:\n\n")
+                        debug_file.write(debug_info['transcription'])
+                        debug_file.write("\n\n### Verification Feedback History:\n")
+                        debug_file.write(debug_info['feedback_history'])
+                        debug_file.write("\n\n---\n\n")
+                
+                console.print(f"[bold yellow]✓[/bold yellow] Created debug file: {debug_filename}")
+                console.print(f"[dim]Debug file size: {os.path.getsize(debug_filename) / 1024:.2f} KB[/dim]")
+                
+                # Ask user if they want to retry
+                if prompt_retry_failed_pages():
+                    # Set up for retry - only process failed pages
+                    pages_to_process = list(debug_pages.keys())
+                    # Clear page status for retry
+                    for page_num in pages_to_process:
+                        page_status[page_num] = ("[dim]Waiting[/dim]", "")
+                    continue  # Go to next iteration of while loop
+                else:
+                    # User chose not to retry
+                    break
+            else:
+                # No failed pages, exit the retry loop
+                break
+            
+        except Exception as e:
+            console.print(f"[bold red]Error during transcription:[/bold red] {e}")
+            sys.exit(1)
+    
+    # Now write the final markdown file with all results
+    try:
+        console.print(f"\n[bold cyan]Writing final markdown file...[/bold cyan]")
         
         with open(markdown_filename, 'w', encoding='utf-8') as md_file:
             # Add header
@@ -664,8 +747,8 @@ def create_markdown_file_concurrent(pdf_path, images):
                 
                 md_file.write(f"## Page {i}\n\n")
                 
-                if i in results:
-                    md_file.write(results[i])
+                if i in all_results:
+                    md_file.write(all_results[i])
                 else:
                     md_file.write(f"\n[Error: Page {i} missing from results]\n")
                 
@@ -673,29 +756,6 @@ def create_markdown_file_concurrent(pdf_path, images):
         
         console.print(f"\n[bold green]✓[/bold green] Successfully created {markdown_filename}")
         console.print(f"[dim]File size: {os.path.getsize(markdown_filename) / 1024:.2f} KB[/dim]")
-        
-        # Create debug file if any pages hit retry limit
-        if debug_pages:
-            debug_filename = f"{pdf_name}_error_debug.md"
-            console.print(f"\n[bold yellow]Creating debug file for {len(debug_pages)} pages that hit retry limit...[/bold yellow]")
-            
-            with open(debug_filename, 'w', encoding='utf-8') as debug_file:
-                debug_file.write(f"# {pdf_name} - Error Debug Report\n\n")
-                debug_file.write(f"*This file contains debug information for pages that reached the retry limit*\n\n")
-                debug_file.write(f"Total pages with max retries: {len(debug_pages)}\n\n")
-                debug_file.write("---\n\n")
-                
-                for page_num in sorted(debug_pages.keys()):
-                    debug_info = debug_pages[page_num]
-                    debug_file.write(f"## Page {page_num}\n\n")
-                    debug_file.write("### Final Transcription:\n\n")
-                    debug_file.write(debug_info['transcription'])
-                    debug_file.write("\n\n### Verification Feedback History:\n")
-                    debug_file.write(debug_info['feedback_history'])
-                    debug_file.write("\n\n---\n\n")
-            
-            console.print(f"[bold yellow]✓[/bold yellow] Created debug file: {debug_filename}")
-            console.print(f"[dim]Debug file size: {os.path.getsize(debug_filename) / 1024:.2f} KB[/dim]")
         
     except Exception as e:
         console.print(f"[bold red]Error creating markdown file:[/bold red] {e}")
