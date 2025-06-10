@@ -16,6 +16,9 @@ from PIL import Image
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.console import Console
 
+api_key = os.environ.get('GOOGLE_API_KEY')
+print(f"Running with API key: {api_key}")
+
 
 def get_output_mode():
     """Prompt user to select output mode."""
@@ -158,7 +161,7 @@ def create_zip_file(pdf_path, images, dpi):
 
 def setup_gemini_client():
     """Setup Google Gemini client."""
-    return genai.Client()
+    return genai.Client(api_key=api_key)
 
 
 def transcribe_image_to_markdown(client:genai.Client, image, page_num, total_pages):
